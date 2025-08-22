@@ -164,6 +164,17 @@
       { jp:['ありがとうございます'], ko:['감사합니다','고맙습니다'] }
     ];
 
+    // ----- 카운터 유틸 (추가) -----
+    function getDeckSize(){
+      try { return (JSON.parse(localStorage.getItem(LS_KEY) || '[]') || []).length; }
+      catch(e){ return 0; }
+    }
+    function refreshCounter(){
+      var n = getDeckSize();
+      if (USED.length === 0) spnCount.textContent = '0';
+      spnTarget.textContent = String(n);
+    }
+
     // ----- Unique random picker -----
     function pickMode(){ var d=selDirection.value; return d==='random' ? (Math.random()<0.5?'jp2ko':'ko2jp') : d; }
     function nextUniqueIndex(){
@@ -270,7 +281,9 @@
     btnStart.addEventListener('click', startSession);
     btnRestart.addEventListener('click', function(){
       endSession();
-      spnCount.textContent='0'; spnTarget.textContent='0';
+      USED = [];
+      spnCount.textContent='0';
+      spnTarget.textContent=String(getDeckSize()); // ← 현재 단어 수 유지 (수정)
       promptBadge.textContent='Ready'; promptEl.textContent='시작을 눌러주세요'; subPrompt.textContent='';
     });
 
@@ -297,7 +310,7 @@
       }
       var dels=listWrap.querySelectorAll('.btnDel');
       for(var j=0;j<dels.length;j++){
-        dels[j].onclick=function(ev){ var idx=parseInt(ev.currentTarget.getAttribute('data-i'),10); DECK.splice(idx,1); saveDeck(DECK); renderList(); };
+        dels[j].onclick=function(ev){ var idx=parseInt(ev.currentTarget.getAttribute('data-i'),10); DECK.splice(idx,1); saveDeck(DECK); renderList(); refreshCounter(); }; // ← 추가
       }
     }
     function openManage(){
@@ -316,7 +329,7 @@
       var jp=inJP.value.trim(); var ko=inKO.value.trim(); if(!jp||!ko) return;
       var obj={ jp: jp.split(';').map(function(s){return s.trim();}).filter(Boolean),
                 ko: ko.split(';').map(function(s){return s.trim();}).filter(Boolean) };
-      DECK.push(obj); saveDeck(DECK); inJP.value=''; inKO.value=''; renderList();
+      DECK.push(obj); saveDeck(DECK); inJP.value=''; inKO.value=''; renderList(); refreshCounter(); // ← 추가
     });
     if(btnExport) btnExport.addEventListener('click', function(){
       var blob=new Blob([JSON.stringify(DECK,null,2)], {type:'application/json'});
@@ -327,15 +340,18 @@
       reader.onload=function(){
         try{
           var data=JSON.parse(reader.result);
-          if(Array.isArray(data)){ DECK=data; saveDeck(DECK); USED=[]; renderList(); }
+          if(Array.isArray(data)){ DECK=data; saveDeck(DECK); USED=[]; renderList(); refreshCounter(); } // ← 추가
           else alert('JSON 배열 형식이 아닙니다.');
         }catch(err){ alert('JSON 형식이 올바르지 않습니다.'); }
         finally{ fileImport.value=''; }
       };
       reader.readAsText(f);
     });
-    if(btnSample) btnSample.addEventListener('click', function(){ DECK=SAMPLE.slice(); saveDeck(DECK); USED=[]; renderList(); });
-    if(btnClear) btnClear.addEventListener('click', function(){ if(confirm('정말 전체 삭제합니까?')){ DECK=[]; saveDeck(DECK); USED=[]; renderList(); } });
+    if(btnSample) btnSample.addEventListener('click', function(){ DECK=SAMPLE.slice(); saveDeck(DECK); USED=[]; renderList(); refreshCounter(); }); // ← 추가
+    if(btnClear) btnClear.addEventListener('click', function(){ if(confirm('정말 전체 삭제합니까?')){ DECK=[]; saveDeck(DECK); USED=[]; renderList(); refreshCounter(); } }); // ← 추가
+
+    // 초기 카운터 표시 (추가)
+    refreshCounter();
 
     // ----- PWA (선택) -----
     var deferredPrompt=null; var btnInstall=document.getElementById('btnInstall');
@@ -348,8 +364,3 @@
   </script>
 </body>
 </html>
-
-
-
-
-
