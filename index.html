@@ -89,9 +89,23 @@
           <input id="inKO" class="flex-1 px-3 py-2 rounded-xl bg-gray-800 border border-gray-700" placeholder="한국어 뜻 (여러 정답은 ; 로 구분)" />
           <button id="btnAdd" class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500" type="button">추가</button>
         </div>
-        <div class="flex items-center gap-2 text-sm mb-3">
+        <div class="flex flex-wrap items-center gap-2 text-sm mb-3">
           <input id="ckShowData" type="checkbox" class="accent-indigo-600" />
           <label for="ckShowData">원시 데이터 보기(JSON)</label>
+
+          <!-- (기존) 헷갈림 필터 -->
+          <input id="ckOnlyConfused" type="checkbox" class="accent-pink-500 ml-2" />
+          <label for="ckOnlyConfused">헷갈리는 것만</label>
+
+          <!-- (추가) 정렬 셀렉트 -->
+          <select id="selSort" class="bg-gray-800 border border-gray-700 rounded px-2 py-1">
+            <option value="none">정렬: 기본</option>
+            <option value="wrongDesc">정렬: 틀린 ↘ (내림)</option>
+            <option value="wrongAsc">정렬: 틀린 ↗ (오름)</option>
+            <option value="correctDesc">정렬: 맞은 ↘ (내림)</option>
+            <option value="correctAsc">정렬: 맞은 ↗ (오름)</option>
+          </select>
+
           <button id="btnExport" class="ml-auto px-3 py-1.5 rounded-xl bg-gray-800" type="button">Export</button>
           <label class="px-3 py-1.5 rounded-xl bg-gray-800 cursor-pointer">Import <input id="fileImport" type="file" accept=".json,.txt" class="hidden" /></label>
           <button id="btnSample" class="px-3 py-1.5 rounded-xl bg-gray-800" type="button">샘플 로드</button>
@@ -111,11 +125,21 @@
     function loadDeck(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)||'[]'); }catch(e){ return []; } }
     function saveDeck(d){ localStorage.setItem(LS_KEY, JSON.stringify(d)); }
 
+    // (유지) 통계 저장소
+    var LS_STATS_KEY='gc_lingo_stats_v1';
+    function loadStats(){ try{ return JSON.parse(localStorage.getItem(LS_STATS_KEY)||'{}'); }catch(e){ return {}; } }
+    function saveStats(s){ localStorage.setItem(LS_STATS_KEY, JSON.stringify(s)); }
+    function itemKey(it){
+      var a=(it.jp||[]).join('|'); var b=(it.ko||[]).join('|');
+      return 'jp='+a+'||ko='+b;
+    }
+
     // ----- State -----
     var DECK=loadDeck();
     var USED=[]; // 이번 세션에 이미 낸 인덱스
     var SESSION={ target:0, count:0, correct:0, total:0 };
     var CUR=null; // {idx, item, mode}
+    var waitingNext=false, lastWasCorrect=false; // Enter 두번 처리
 
     // ----- DOM -----
     var selDirection=document.getElementById('selDirection');
@@ -142,12 +166,14 @@
     var listWrap=document.getElementById('listWrap');
     var taRaw=document.getElementById('taRaw');
     var ckShowData=document.getElementById('ckShowData');
+    var ckOnlyConfused=document.getElementById('ckOnlyConfused'); // 유지
+    var selSort=document.getElementById('selSort'); // (추가)
     var fileImport=document.getElementById('fileImport');
     var btnExport=document.getElementById('btnExport');
     var btnSample=document.getElementById('btnSample');
     var btnClear=document.getElementById('btnClear');
 
-    // ----- Utils -----
+    // ----- Utils (유지) -----
     function toHiragana(s){ return s.replace(/[ァ-ン]/g,function(ch){ return String.fromCharCode(ch.charCodeAt(0)-96); }); }
     function normalize(s){ s=(s==null? '': String(s)).trim().toLowerCase(); try{s=s.normalize('NFKC');}catch(e){}; s=s.replace(/[\u2010-\u2015]/g,'-').replace(/[\u3000\s]+/g,' ').replace(/[\p{P}\p{S}]/gu,''); return s; }
     function normJP(s){ return normalize(toHiragana(s)); }
@@ -164,7 +190,7 @@
       { jp:['ありがとうございます'], ko:['감사합니다','고맙습니다'] }
     ];
 
-    // ----- 카운터 유틸 (추가) -----
+    // ----- 카운터 유틸 (유지) -----
     function getDeckSize(){
       try { return (JSON.parse(localStorage.getItem(LS_KEY) || '[]') || []).length; }
       catch(e){ return 0; }
@@ -188,10 +214,12 @@
       DECK=loadDeck();
       if(!Array.isArray(DECK) || DECK.length===0){ alert('단어장이 비어있습니다.'); return; }
       USED=[];
-      // 요청: 문항 0 / (등록된 단어 수)
-      SESSION={ target: DECK.length, count:0, correct:0, total:0 };
+      // (변경) 세션 타깃 = 선택 문제수(0=무제한→덱 길이)과 덱 길이 중 작은 값
+      var wanted = parseInt(selSession.value,10) || 0;                  // 0 = 무제한
+      var target = wanted === 0 ? DECK.length : Math.min(DECK.length, wanted);
+      SESSION={ target: target, count:0, correct:0, total:0 };
       spnCount.textContent='0';
-      spnTarget.textContent=String(DECK.length);
+      spnTarget.textContent=String(target); // (변경) 세션 동안 목표 문항 표시
       answerForm.classList.remove('hidden');
       startBar.classList.add('hidden');
       resultBox.classList.add('hidden');
@@ -201,7 +229,8 @@
 
     function nextQuestion(){
       if(DECK.length===0){ alert('단어장이 비어있습니다.'); return; }
-      if(USED.length >= DECK.length){
+      // (변경) 덱 전체 소진이 아니라 세션 타깃 달성 시 종료
+      if(USED.length >= SESSION.target){
         alert('더 이상 문제가 없습니다.');
         endSession();
         return;
@@ -222,41 +251,77 @@
         subPrompt.textContent = (CUR.item.ko.slice(1).join(' / '));
       }
       answerInput.value='';
+      waitingNext=false; // 새 문제 진입 시 초기화
     }
 
+    // (유지) 채점: 완전 일치만 정답
     function judge(user){
       var item=CUR.item, mode=CUR.mode;
       var okList=(mode==='jp2ko'? item.ko: item.jp);
-      var userNorm=(mode==='jp2ko'? normKO(user): normJP(user));
+      var u=String(user||'').trim(); // 앞뒤 공백만 제거, 내부 띄어쓰기·오타는 모두 틀림
       var match=false;
       for(var i=0;i<okList.length;i++){
-        var cand=(mode==='jp2ko'? normKO(okList[i]): normJP(okList[i]));
-        if(fuzzyEq(userNorm,cand)){ match=true; break; }
+        if(String(okList[i]).trim()===u){ match=true; break; }
       }
       return {match:match, okList:okList};
+    }
+
+    // (유지) 통계
+    function getStatFor(item){
+      var stats=loadStats(); var key=itemKey(item);
+      return stats[key] || {seen:0, correct:0, wrong:0, confused:false};
+    }
+    function setStatFor(item, updater){
+      var stats=loadStats(); var key=itemKey(item);
+      var cur=stats[key] || {seen:0, correct:0, wrong:0, confused:false};
+      var next=updater(cur)||cur;
+      stats[key]=next; saveStats(stats);
+      return next;
     }
 
     function showResult(match, okList){
       resultBox.classList.remove('hidden');
       resultBox.className='mt-5 p-4 rounded-2xl border '+(match? 'bg-emerald-900/20 border-emerald-800':'bg-red-900/20 border-red-800');
       var codes=''; for(var i=0;i<okList.length;i++){ codes += '<code class="px-1 py-0.5 bg-gray-800 rounded">'+ okList[i] +'</code> '; }
+
+      var st=getStatFor(CUR.item);
       resultBox.innerHTML =
         '<div class="flex items-center justify-between">'+
           '<div class="font-semibold">'+(match? '정답! ✅':'오답 ❌')+'</div>'+
+          '<div class="text-xs text-gray-400">Enter 한번 더 → 다음</div>'+
         '</div>'+
         '<div class="mt-2 text-sm">'+
           '<div class="text-gray-400">모범 답안</div>'+
           '<div class="mt-1">'+ codes +'</div>'+
         '</div>'+
+        '<div class="mt-3 flex items-center gap-3 text-sm">'+
+          '<label class="inline-flex items-center gap-2"><input id="ckConfused" type="checkbox" class="accent-pink-500"> 헷갈리는 문제로 표시</label>'+
+          '<span class="text-xs text-gray-400">정답 '+st.correct+' · 오답 '+st.wrong+'</span>'+
+        '</div>'+
         '<button id="btnNext" class="mt-3 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500">다음 문제</button>';
+
+      var ckConfused=document.getElementById('ckConfused');
+      if(ckConfused){ ckConfused.checked=!!st.confused; ckConfused.onchange=function(){
+        setStatFor(CUR.item, function(prev){ prev.confused=!!ckConfused.checked; return prev; });
+      }; }
+
       var btnNext=document.getElementById('btnNext');
       btnNext.onclick=function(){ handleNext(match); };
+
+      waitingNext=true; lastWasCorrect=match; // Enter 두 번 대기
     }
 
-    function finalizeAnswer(correct){ SESSION.total++; if(correct) SESSION.correct++; }
+    function finalizeAnswer(correct){
+      SESSION.total++; if(correct) SESSION.correct++;
+      setStatFor(CUR.item, function(prev){
+        prev.seen++; if(correct) prev.correct++; else prev.wrong++; return prev;
+      });
+    }
+
     function handleNext(wasCorrect){
       finalizeAnswer(wasCorrect);
-      if(USED.length >= DECK.length){ alert('더 이상 문제가 없습니다.'); endSession(); return; }
+      // (변경) 세션 목표 달성 체크
+      if(USED.length >= SESSION.target){ alert('더 이상 문제가 없습니다.'); endSession(); return; }
       resultBox.classList.add('hidden');
       nextQuestion();
       answerInput.focus();
@@ -266,14 +331,24 @@
       promptEl.textContent='세션 완료 🎉 다시 시작하려면 [세션 시작]';
       subPrompt.textContent=''; promptBadge.textContent='Done';
       resultBox.classList.add('hidden'); answerForm.classList.add('hidden'); startBar.classList.remove('hidden');
+      waitingNext=false;
     }
 
-    // 제출: 새로고침 방지
+    // 제출
     answerForm.addEventListener('submit', function(e){
       e.preventDefault();
       var v=answerInput.value;
       var r=judge(v);
       showResult(r.match, r.okList);
+    });
+
+    // Enter 두 번 → 다음
+    document.addEventListener('keydown', function(e){
+      if(waitingNext && (e.key==='Enter' || e.keyCode===13)){
+        e.preventDefault();
+        waitingNext=false;
+        handleNext(lastWasCorrect);
+      }
     });
 
     // 시작/다시하기
@@ -282,11 +357,11 @@
       endSession();
       USED = [];
       spnCount.textContent='0';
-      spnTarget.textContent=String(getDeckSize()); // ← 현재 단어 수 유지 (수정)
+      spnTarget.textContent=String(getDeckSize());
       promptBadge.textContent='Ready'; promptEl.textContent='시작을 눌러주세요'; subPrompt.textContent='';
     });
 
-    // 단축키: Ctrl+N 다음
+    // Ctrl+N → 다음 (유지)
     document.addEventListener('keydown', function(e){
       if(e.ctrlKey && String(e.key).toLowerCase()==='n'){
         e.preventDefault(); handleNext(false);
@@ -297,19 +372,47 @@
     function renderList(){
       listWrap.innerHTML='';
       if(ckShowData.checked){ taRaw.classList.remove('hidden'); taRaw.value=JSON.stringify(DECK,null,2); } else { taRaw.classList.add('hidden'); }
+
+      var onlyConf = !!(ckOnlyConfused && ckOnlyConfused.checked);
+      var sortMode = selSort ? selSort.value : 'none'; // (추가)
+
       if(!DECK.length){ listWrap.innerHTML='<div class="p-3 text-sm text-gray-400">(비어있음)</div>'; return; }
+
+      // (추가) 정렬을 위해 중간 배열 구성
+      var rows = [];
       for(var i=0;i<DECK.length;i++){
-        var it=DECK[i]; var row=document.createElement('div'); row.className='flex items-center gap-2 px-3 py-2 border-b border-gray-800';
+        var it=DECK[i], st=getStatFor(it);
+        if(onlyConf && !st.confused) continue;
+        rows.push({ idx:i, it:it, st:st });
+      }
+
+      // (추가) 정렬 로직
+      function cmp(a,b, key, dir){
+        var va=a.st[key]||0, vb=b.st[key]||0;
+        return dir==='asc' ? (va-vb) : (vb-va);
+      }
+      if(sortMode==='wrongDesc') rows.sort(function(a,b){ return cmp(a,b,'wrong','desc'); });
+      else if(sortMode==='wrongAsc') rows.sort(function(a,b){ return cmp(a,b,'wrong','asc'); });
+      else if(sortMode==='correctDesc') rows.sort(function(a,b){ return cmp(a,b,'correct','desc'); });
+      else if(sortMode==='correctAsc') rows.sort(function(a,b){ return cmp(a,b,'correct','asc'); });
+      // 'none'은 입력 순서 유지
+
+      // 렌더
+      for(var r=0;r<rows.length;r++){
+        var it=rows[r].it, st=rows[r].st, i=rows[r].idx;
+        var row=document.createElement('div'); row.className='flex items-center gap-2 px-3 py-2 border-b border-gray-800';
         row.innerHTML='<div class="flex-1">'+
-          '<div class="text-sm font-medium">'+ (it.jp||[]).join(' / ') +'</div>'+
+          '<div class="text-sm font-medium">'+ (it.jp||[]).join(' / ') + (st.confused? ' <span class="text-pink-400">★</span>':'') +'</div>'+
           '<div class="text-xs text-gray-400">'+ (it.ko||[]).join(' / ') +'</div>'+
         '</div>'+
+        '<div class="text-xs text-gray-400 mr-2">정답 '+(st.correct||0)+' · 오답 '+(st.wrong||0)+'</div>'+
         '<button data-i="'+i+'" class="btnDel px-2 py-1 rounded bg-gray-800">삭제</button>';
         listWrap.appendChild(row);
       }
+
       var dels=listWrap.querySelectorAll('.btnDel');
       for(var j=0;j<dels.length;j++){
-        dels[j].onclick=function(ev){ var idx=parseInt(ev.currentTarget.getAttribute('data-i'),10); DECK.splice(idx,1); saveDeck(DECK); renderList(); refreshCounter(); }; // ← 추가
+        dels[j].onclick=function(ev){ var idx=parseInt(ev.currentTarget.getAttribute('data-i'),10); DECK.splice(idx,1); saveDeck(DECK); renderList(); refreshCounter(); };
       }
     }
     function openManage(){
@@ -324,11 +427,13 @@
     if(btnManage) btnManage.addEventListener('click', openManage);
     if(btnCloseManage) btnCloseManage.addEventListener('click', function(e){ e.preventDefault(); closeManage(); });
     if(ckShowData) ckShowData.addEventListener('change', renderList);
+    if(ckOnlyConfused) ckOnlyConfused.addEventListener('change', renderList);
+    if(selSort) selSort.addEventListener('change', renderList); // (추가)
     if(btnAdd) btnAdd.addEventListener('click', function(){
       var jp=inJP.value.trim(); var ko=inKO.value.trim(); if(!jp||!ko) return;
       var obj={ jp: jp.split(';').map(function(s){return s.trim();}).filter(Boolean),
                 ko: ko.split(';').map(function(s){return s.trim();}).filter(Boolean) };
-      DECK.push(obj); saveDeck(DECK); inJP.value=''; inKO.value=''; renderList(); refreshCounter(); // ← 추가
+      DECK.push(obj); saveDeck(DECK); inJP.value=''; inKO.value=''; renderList(); refreshCounter();
     });
     if(btnExport) btnExport.addEventListener('click', function(){
       var blob=new Blob([JSON.stringify(DECK,null,2)], {type:'application/json'});
@@ -339,17 +444,17 @@
       reader.onload=function(){
         try{
           var data=JSON.parse(reader.result);
-          if(Array.isArray(data)){ DECK=data; saveDeck(DECK); USED=[]; renderList(); refreshCounter(); } // ← 추가
+          if(Array.isArray(data)){ DECK=data; saveDeck(DECK); USED=[]; renderList(); refreshCounter(); }
           else alert('JSON 배열 형식이 아닙니다.');
         }catch(err){ alert('JSON 형식이 올바르지 않습니다.'); }
         finally{ fileImport.value=''; }
       };
       reader.readAsText(f);
     });
-    if(btnSample) btnSample.addEventListener('click', function(){ DECK=SAMPLE.slice(); saveDeck(DECK); USED=[]; renderList(); refreshCounter(); }); // ← 추가
-    if(btnClear) btnClear.addEventListener('click', function(){ if(confirm('정말 전체 삭제합니까?')){ DECK=[]; saveDeck(DECK); USED=[]; renderList(); refreshCounter(); } }); // ← 추가
+    if(btnSample) btnSample.addEventListener('click', function(){ DECK=SAMPLE.slice(); saveDeck(DECK); USED=[]; renderList(); refreshCounter(); });
+    if(btnClear) btnClear.addEventListener('click', function(){ if(confirm('정말 전체 삭제합니까?')){ DECK=[]; saveDeck(DECK); USED=[]; renderList(); refreshCounter(); } });
 
-    // 초기 카운터 표시 (추가)
+    // 초기 카운터 표시
     refreshCounter();
 
     // ----- PWA (선택) -----
@@ -363,4 +468,3 @@
   </script>
 </body>
 </html>
-
